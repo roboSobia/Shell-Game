@@ -3,11 +3,15 @@
 import cv2
 import numpy as np
 import time
+import serial
 
 # Initialize webcam with IP camera URL
-url = "http://192.168.100.4:8080/video"
+url = "http://192.168.49.1:8080/video"
 cap = cv2.VideoCapture(url)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+# Initialize serial connection to ESP32 (adjust port as needed)
+esp32_serial = serial.Serial('/dev/ttyUSB0', 9600, timeout=1)  # Change port if needed
 
 # Define flexible color range for white/off-white cups in HSV
 # Wider range for hue (all colors), lower saturation (more white), higher value (brighter)
@@ -33,16 +37,20 @@ missing_cup_index = None
 last_motion_times = [time.time(), time.time(), time.time()]
 last_cup_centers = [None, None, None]
 motion_threshold = 10  # pixels
-motion_timeout = 10     # secondsq
+motion_timeout = 5     # secondsq
 game_ended = False
 last_wanted_cup_idx = None  # Track the wanted cup after game ends
 last_moved_cup_idx = None   # Track the last moved cup
-
+wantedCup=-1
 # Track the last cup that had the ball under it before ending
 last_ball_under_cup_idx = None
 
 # Flag to indicate if any cup has the ball under it
 cup_has_ball_flag = False
+
+# Add flag to prevent spamming commands
+arm_command_sent = False
+last_sent_cup = -2  # Track last cup sent to arm
 
 def update_white_threshold(frame):
     """Dynamically adjust white detection based on overall brightness"""
@@ -325,6 +333,68 @@ while True:
             wantedCup = -1
         print("wantedCup:", wantedCup)
 
+        # Only send arm command once per game end event
+        if wantedCup in [0, 1, 2] and not arm_command_sent:
+            # Define positions for each cup
+            if wantedCup == 0:
+                cup_pos = "180,120,120"
+                lift_pos = "180,130,60"
+            elif wantedCup == 1:
+                cup_pos = "160,85,75"
+                lift_pos = "180,85,90"
+            elif wantedCup == 2:
+                cup_pos  = "180,35,120"
+                lift_pos = "180,35,60"
+            else:
+                cup_pos = None
+                lift_pos = None
+
+            if cup_pos and lift_pos:
+                # 1. Go to cup position (magnet off)
+                cmd1 = f"{cup_pos},0\n"
+                esp32_serial.write(cmd1.encode())
+                print(f"Sent to ESP32: {cmd1.strip()}")
+                time.sleep(2.0)  # Wait for arm to reach cup
+
+                # 2. Activate magnet at cup position
+                cmd2 = f"{cup_pos},1\n"
+                esp32_serial.write(cmd2.encode())
+                print(f"Sent to ESP32: {cmd2.strip()}")
+                time.sleep(1.0)  # Wait for magnet to activate
+
+                # 3. Go to lifting position (magnet on)
+                cmd3 = f"{lift_pos},1\n"
+                esp32_serial.write(cmd3.encode())
+                print(f"Sent to ESP32: {cmd3.strip()}")
+                time.sleep(2.0)  # Wait for arm to lift
+
+                # # 4. Return to cup position (magnet on)
+                # cmd4 = f"{cup_pos},1\n"
+                # esp32_serial.write(cmd4.encode())
+                # print(f"Sent to ESP32: {cmd4.strip()}")
+                # time.sleep(1.0)  # Wait for arm to lower
+
+                # # 5. Turn off magnet at cup position
+                # cmd5 = f"{cup_pos},0\n"
+                # esp32_serial.write(cmd5.encode())
+                # print(f"Sent to ESP32: {cmd5.strip()}")
+                # time.sleep(1.0)  # Wait for magnet to deactivate
+
+                # 6. Return to home position
+                home_cmd = "180,90,0,1\n"
+                esp32_serial.write(home_cmd.encode())
+                print(f"Sent to ESP32: {home_cmd.strip()}")
+                home_cmd = "180,90,0,0\n"
+                esp32_serial.write(home_cmd.encode())
+                print(f"Sent to ESP32: {home_cmd.strip()}")
+                arm_command_sent = True
+                last_sent_cup = wantedCup
+
+        # Reset arm_command_sent if wantedCup changes or game is reset
+        if wantedCup not in [0, 1, 2]:
+            arm_command_sent = False
+            last_sent_cup = -2
+
         # Draw names above each cup (only after game end)
         for i, (x, y, w, h) in enumerate(boxes):
             center = (int(x + w/2), int(y + h/2))
@@ -357,6 +427,8 @@ while True:
             last_wanted_cup_idx = None
             last_moved_cup_idx = None
             last_ball_under_cup_idx = None
+            arm_command_sent = False  # Reset flag on game reset
+            last_sent_cup = -2
             print("Reset: Re-detecting cups...")
         continue
     
